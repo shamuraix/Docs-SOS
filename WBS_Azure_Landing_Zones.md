@@ -15,25 +15,31 @@
    - 1.2.3. Configure authentication with Azure (az login or service principal)
    - 1.2.4. Set up local state management or Azure Storage Account for Terraform state
 
-## 2. Custom Archetype Configuration
+## 2. Custom Library Configuration
 
-2.1. Archetype Definition Creation
-   - 2.1.1. Create custom archetype definitions folder structure
-   - 2.1.2. Define archetype for "private" (replacing "corp") management group
-   - 2.1.3. Define archetype for "public" (replacing "online") management group
-   - 2.1.4. Configure custom policy assignments for archetypes
+2.1. Custom Library Structure Setup
+   - 2.1.1. Create `lib` directory in your Terraform working folder
+   - 2.1.2. Create proper subdirectory structure (`archetype_definition_files`, `archetype_exclusion_files`, etc.)
+   - 2.1.3. Create placeholder files in each directory if needed
+   - 2.1.4. Document custom library directory structure
 
-2.2. Archetype Library Configuration
-   - 2.2.1. Create archetype_definition_private.json and archetype_definition_public.json
-   - 2.2.2. Configure policy and role mappings in archetype definitions
-   - 2.2.3. Create archetype_exclusions if needed for specific scenarios
-   - 2.2.4. Document custom archetype library structure
+2.2. Custom Archetype Definitions
+   - 2.2.1. Copy default archetypes from caf-enterprise-scale module to your custom library
+   - 2.2.2. Modify archetype definition to rename "corp" to "private"
+   - 2.2.3. Modify archetype definition to rename "online" to "public"
+   - 2.2.4. Update archetype references in default and custom definitions
 
-2.3. Feature Flag Configuration
-   - 2.3.1. Create variables for enabling/disabling optional features
-   - 2.3.2. Set DDoS Protection parameter to disable this feature
-   - 2.3.3. Configure parameters to disable Azure Bastion host
-   - 2.3.4. Set parameters to disable Microsoft Defender for Cloud
+2.3. Custom Policy Configuration
+   - 2.3.1. Configure policy assignments in custom archetype definitions
+   - 2.3.2. Exclude Microsoft Defender for Cloud policies from assignments
+   - 2.3.3. Configure custom policy parameters in archetype definitions
+   - 2.3.4. Document all custom policy modifications
+
+2.4. Feature Flag Configuration
+   - 2.4.1. Create variables for enabling/disabling optional features
+   - 2.4.2. Set DDoS Protection parameter to disable this feature
+   - 2.4.3. Configure parameters to disable Azure Bastion host
+   - 2.4.4. Configure parameters to disable public IP addresses where possible
 
 ## 3. Core Configuration Files
 
@@ -44,10 +50,10 @@
    - 3.1.4. Create `outputs.tf` for important resource references
 
 3.2. Management Group Module Configuration
-   - 3.2.1. Configure management group module with custom archetype library path
-   - 3.2.2. Set up management group parameters to use custom archetypes
+   - 3.2.1. Configure management group module with `library_path` parameter
+   - 3.2.2. Set `archetype_config_overrides` for custom management group mappings
    - 3.2.3. Configure subscription associations to management groups
-   - 3.2.4. Map management groups to custom archetype definitions
+   - 3.2.4. Configure custom naming format for management groups
 
 ## 4. Network Infrastructure
 
@@ -108,7 +114,7 @@
 7.1. As-Built Documentation
    - 7.1.1. Document deployed infrastructure components
    - 7.1.2. Create network architecture diagrams
-   - 7.1.3. Document custom archetype definitions
+   - 7.1.3. Document custom archetype definitions and library structure
    - 7.1.4. Create configuration reference guide
 
 7.2. Operational Documentation
