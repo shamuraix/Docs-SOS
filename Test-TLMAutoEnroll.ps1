@@ -48,7 +48,7 @@
 
 #>
 
-[CmdletBinding(DefaultParameterSetName='HostName')]
+[CmdletBinding()]
 param(
   [Parameter(Position=0,Mandatory=$true,ValueFromPipeline=$true)]
   [ValidateNotNullOrEmpty()]
@@ -68,15 +68,25 @@ param(
   
   [Parameter()]
   [ValidateRange(10,300)]
-  [int]$TimeoutSeconds = 60
+  [int]$TimeoutSeconds = 60,
+  
+  [Parameter()]
+  [string[]]$RequiredGroups = @('Cert Publishers'),
+  
+  [Parameter()]
+  [string]$DomainUsersGroup = 'Domain Users'
 )
 
 begin {
   # Ensure Output Encoding supports Unicode
   $PSDefaultParameterValues['*:Encoding'] = 'utf8'
   
-  # Initialize global log file
-  $script:LogFile = Join-Path (Get-Location) $LogPath
+  # Initialize log file with proper path handling
+  $script:LogFile = if ([System.IO.Path]::IsPathRooted($LogPath)) {
+    $LogPath
+  } else {
+    Join-Path (Get-Location) $LogPath
+  }
   "" | Out-File -FilePath $script:LogFile -Force
   
   # Enhanced logging helper with error handling
@@ -106,7 +116,7 @@ begin {
     }
   }
 
-  # Network connectivity test
+  # Network connectivity test with PowerShell version compatibility
   function Test-RemoteConnectivity {
     param(
       [Parameter(Mandatory)][string]$ComputerName,
@@ -114,12 +124,18 @@ begin {
     )
     
     try {
-      $result = Test-Connection -ComputerName $ComputerName -Count 1 -TimeoutSeconds $TimeoutSeconds -Quiet
+      if ($PSVersionTable.PSVersion.Major -ge 6) {
+        $result = Test-Connection -ComputerName $ComputerName -Count 1 -TimeoutSeconds $TimeoutSeconds -Quiet
+      } else {
+        # Fallback for older PowerShell versions
+        $result = Test-Connection -ComputerName $ComputerName -Count 1 -Quiet
+      }
+      
       if ($result) {
-        Write-Log "Network connectivity to ${ComputerName}: OK" DEBUG
+        Write-Log "Network connectivity to $ComputerName`: OK" DEBUG
         return $true
       } else {
-        Write-Log "Network connectivity to ${ComputerName}: FAILED" ERROR
+        Write-Log "Network connectivity to $ComputerName`: FAILED" ERROR
         return $false
       }
     } catch {
@@ -143,11 +159,15 @@ begin {
       ComputerName = $ComputerName
       ScriptBlock = $ScriptBlock
       ErrorAction = 'Stop'
-      ConnectionTimeout = $TimeoutSeconds
-      OperationTimeout = $TimeoutSeconds
     }
     
-    if ($ArgumentList.Count -gt 0) {
+    # Add timeout parameters if supported (Windows PowerShell 5+)
+    if ($PSVersionTable.PSVersion.Major -ge 5 -and $PSVersionTable.PSEdition -eq 'Desktop') {
+      $invokeParams.ConnectionTimeout = $TimeoutSeconds
+      $invokeParams.OperationTimeout = $TimeoutSeconds
+    }
+    
+    if ($ArgumentList -and $ArgumentList.Count -gt 0) {
       $invokeParams.ArgumentList = $ArgumentList
     }
     
@@ -390,37 +410,19 @@ process {
 
       # AD group membership checks
       try {
-        $adInfo = & {
-          param($computerName, $userName)
-          try {
-            $compObj = Get-ADComputer -Identity $computerName -ErrorAction Stop
-            $certPubMembers = Get-ADGroupMember -Identity 'Cert Publishers' -Recursive -ErrorAction Stop | 
-              Select-Object -ExpandProperty DistinguishedName
-            $authAccessMembers = Get-ADGroupMember -Identity 'Authorization Access' -Recursive -ErrorAction Stop | 
-              Select-Object -ExpandProperty DistinguishedName
-            
-            [PSCustomObject]@{
-              IsCertPublisher = $compObj.DistinguishedName -in $certPubMembers
-              IsAuthAccessMember = $compObj.DistinguishedName -in $authAccessMembers
-              Error = $null
-            }
-          } catch {
-            [PSCustomObject]@{
-              IsCertPublisher = $null
-              IsAuthAccessMember = $null
-              Error = $_.Exception.Message
-            }
-          }
-        } -ArgumentList $cn, $Username
+        Write-Log "Checking domain group membership for computer $cn" DEBUG
         
-        if ($adInfo.Error) {
-          $res.PermissionErrors += "AD group check failed: $($adInfo.Error)"
-          Write-Log "AD group membership check failed: $($adInfo.Error)" ERROR
-        } else {
-          $res.CertPublishMember = $adInfo.IsCertPublisher
-          $res.AuthAccessMember = $adInfo.IsAuthAccessMember
-          Write-Log "Computer in Cert Publishers: $($res.CertPublishMember); in Authorization Access: $($res.AuthAccessMember)" INFO
-        }
+        # These checks run locally against the domain to verify remote computer's group membership
+        $compObj = Get-ADComputer -Identity $cn -ErrorAction Stop
+        $certPubMembers = Get-ADGroupMember -Identity $RequiredGroups[0] -Recursive -ErrorAction Stop | 
+          Select-Object -ExpandProperty DistinguishedName
+        $domainUsersMembers = Get-ADGroupMember -Identity $DomainUsersGroup -Recursive -ErrorAction Stop | 
+          Select-Object -ExpandProperty DistinguishedName
+        
+        $res.CertPublishMember = $compObj.DistinguishedName -in $certPubMembers
+        $res.AuthAccessMember = $compObj.DistinguishedName -in $domainUsersMembers
+        
+        Write-Log "Computer in $($RequiredGroups[0]): $($res.CertPublishMember); in $DomainUsersGroup`: $($res.AuthAccessMember)" INFO
       } catch {
         $res.PermissionErrors += "AD group check failed: $($_.Exception.Message)"
         Write-Log "AD group membership check failed: $($_.Exception.Message)" ERROR
@@ -429,7 +431,15 @@ process {
       # Certificate template validation
       try {
         $templateResults = Invoke-RemoteCommand -ComputerName $cn -Description "Template validation" -Credential $Credential -TimeoutSeconds $TimeoutSeconds -ScriptBlock {
-          param($devTemplate, $srvTemplate, $usrTemplate, $testUser)
+          param($devTemplate, $srvTemplate, $usrTemplate, $testUser, $requiredGroups, $domainUsersGroup)
+          
+          # Check module availability first
+          if (-not (Get-Module -ListAvailable -Name ADCSAdministration)) {
+            throw "ADCSAdministration module not available on this server"
+          }
+          if (-not (Get-Module -ListAvailable -Name ActiveDirectory)) {
+            throw "ActiveDirectory module not available on this server"
+          }
           
           try {
             Import-Module ADCSAdministration -ErrorAction Stop
@@ -471,8 +481,8 @@ process {
               $templateDN = "CN=$TemplateName,CN=Certificate Templates,CN=Public Key Services,CN=Services,$((Get-ADDomain).DistinguishedName)"
               $acl = Get-ACL "AD:$templateDN" -ErrorAction Stop
               
-              $requiredGroups = @('Domain Computers', 'Domain Users')
-              foreach ($group in $requiredGroups) {
+              $groupsToCheck = $requiredGroups + @($domainUsersGroup)
+              foreach ($group in $groupsToCheck) {
                 $hasEnrollPermission = $acl.Access | Where-Object {
                   $_.IdentityReference -like "*$group" -and 
                   ($_.ActiveDirectoryRights -match 'ExtendedRight' -or $_.ActiveDirectoryRights -match 'GenericAll')
@@ -509,9 +519,14 @@ process {
           # User mapping test
           $userMappingStatus = "OK"
           try {
-            $userObj = Get-ADUser -Identity $testUser -Properties tokenGroupsGlobalAndUniversal -ErrorAction Stop
-            if ($userObj.tokenGroupsGlobalAndUniversal.Count -gt 50) {
-              $userMappingStatus = "WARN: User has many group memberships ($($userObj.tokenGroupsGlobalAndUniversal.Count)) - potential subject mapping issues"
+            if (-not (Get-Module -ListAvailable -Name ActiveDirectory)) {
+              $userMappingStatus = "WARN: ActiveDirectory module not available for user mapping test"
+            } else {
+              Import-Module ActiveDirectory -ErrorAction Stop
+              $userObj = Get-ADUser -Identity $testUser -Properties tokenGroupsGlobalAndUniversal -ErrorAction Stop
+              if ($userObj.tokenGroupsGlobalAndUniversal -and $userObj.tokenGroupsGlobalAndUniversal.Count -gt 50) {
+                $userMappingStatus = "WARN: User has many group memberships ($($userObj.tokenGroupsGlobalAndUniversal.Count)) - potential subject mapping issues"
+              }
             }
           } catch {
             $userMappingStatus = "FAILED: Could not retrieve user information - $($_.Exception.Message)"
@@ -523,7 +538,7 @@ process {
             UserTemplate = $results.User
             UserMappingStatus = $userMappingStatus
           }
-        } -ArgumentList $TemplateDeviceAuth, $TemplateServerAuth, $TemplateUserAuth, $Username
+        } -ArgumentList $TemplateDeviceAuth, $TemplateServerAuth, $TemplateUserAuth, $Username, $RequiredGroups, $DomainUsersGroup
         
         # Process device template results
         $res.TemplateDeviceAuthStatus = $templateResults.DeviceTemplate.Exists
